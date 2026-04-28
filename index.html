@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>EIKONAL-FLOW | Vector Synthesis Studio</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        body { background-color: #0f172a; color: #f8fafc; overflow: hidden; font-family: sans-serif; }
+        input[type="range"] { accent-color: #38bdf8; cursor: pointer; }
+        .workspace { background-image: radial-gradient(#334155 1px, transparent 1px); background-size: 20px 20px; }
+        .processing-indicator { animation: pulse 1s infinite; color: #38bdf8; }
+        @keyframes pulse { 50% { opacity: 0.2; } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useRef, useEffect, useCallback } = React;
+
+        const SidebarSection = ({ title, children }) => (
+            <div className="mb-6 border-b border-slate-700 pb-4">
+                <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-4">{title}</h3>
+                {children}
+            </div>
+        );
+
+        const Control = ({ label, value, min, max, step, onChange }) => (
+            <div className="mb-4 text-[11px] font-bold">
+                <div className="flex justify-between mb-1">
+                    <label className="text-slate-400">{label}</label>
+                    <span className="text-sky-400 font-mono bg-sky-950 px-1.5 py-0.5 rounded">{value}</span>
+                </div>
+                <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(parseFloat(e.target.value))} className="w-full h-1 bg-slate-700 rounded-lg appearance-none" />
+            </div>
+        );
+
+        const App = () => {
+            const [gamma, setGamma] = useState(1.0);
+            const [contrast, setContrast] = useState(1.0);
+            const [count, setCount] = useState(40);
+            const [showGhost, setShowGhost] = useState(true);
+            const [showSeed, setShowSeed] = useState(true);
+            const [seedPoint, setSeedPoint] = useState({ x: 0.5, y: 0.5 });
+            const [zoom, setZoom] = useState(1.0);
+            const [pan, setPan] = useState({ x: 0, y: 0 });
+            const [image, setImage] = useState(null);
+            const [paths, setPaths] = useState([]);
+            const [isProcessing, setIsProcessing] = useState(false);
+
+            const canvasRef = useRef(null);
+            const workerRef = useRef(null);
+            const fileInputRef = useRef(null);
+            const isPanning = useRef(false);
+            const lastMouse = useRef({ x: 0, y: 0 });
+
+            useEffect(() => {
+                workerRef.current = new Worker('worker.js');
+                workerRef.current.onmessage = (e) => {
+                    setPaths(e.data.paths);
+                    setIsProcessing(false);
+                };
+                return () => workerRef.current.terminate();
+            }, []);
+
+            const requestRender = useCallback(() => {
+                if (!image || !workerRef.current) return;
+                setIsProcessing(true);
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = image.width;
+                tempCanvas.height = image.height;
+                const tCtx = tempCanvas.getContext('2d');
+                tCtx.drawImage(image, 0, 0);
+                workerRef.current.postMessage({
+                    imageData: tCtx.getImageData(0, 0, image.width, image.height),
+                    gamma, contrast, count, seed: seedPoint
+                });
+            }, [image, gamma, contrast, count, seedPoint]);
+
+            useEffect(() => {
+                const timer = setTimeout(requestRender, 250);
+                return () => clearTimeout(timer);
+            }, [requestRender]);
+
+            useEffect(() => {
+                if (!canvasRef.current || !image) return;
+                const canvas = canvasRef.current;
+                const ctx = canvas.getContext('2d');
+                canvas.width = canvas.parentElement.clientWidth;
+                canvas.height = canvas.parentElement.clientHeight;
+                const ratio = Math.min(canvas.width / image.width, canvas.height / image.height);
+                const drawW = image.width * ratio * zoom;
+                const drawH = image.height * ratio * zoom;
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.translate((canvas.width - drawW) / 2 + pan.x, (canvas.height - drawH) / 2 + pan.y);
+                if (showGhost) {
+                    ctx.save(); ctx.globalAlpha = 0.15;
+                    ctx.drawImage(image, 0, 0, drawW, drawH);
+                    ctx.restore();
+                }
+                const pathScale = drawW / image.width;
+                ctx.strokeStyle = '#0ea5e9'; ctx.lineWidth = 1 / zoom;
+                paths.forEach(p => {
+                    ctx.save(); ctx.scale(pathScale, pathScale);
+                    ctx.stroke(new Path2D(p)); ctx.restore();
+                });
+                if (showSeed) {
+                    ctx.fillStyle = '#ef4444'; ctx.beginPath();
+                    ctx.arc(seedPoint.x * drawW, seedPoint.y * drawH, 6, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = 'white'; ctx.lineWidth = 1.5; ctx.stroke();
+                }
+            }, [paths, image, showGhost, showSeed, seedPoint, zoom, pan]);
+
+            const handleMouseDown = (e) => {
+                if (!image) return;
+                if (e.button === 2 || e.button === 1 || e.altKey) {
+                    isPanning.current = true;
+                    lastMouse.current = { x: e.clientX, y: e.clientY };
+                } else {
+                    const rect = canvasRef.current.getBoundingClientRect();
+                    const ratio = Math.min(rect.width / image.width, rect.height / image.height);
+                    const drawW = image.width * ratio * zoom;
+                    const drawH = image.height * ratio * zoom;
+                    const offX = (rect.width - drawW) / 2 + pan.x;
+                    const offY = (rect.height - drawH) / 2 + pan.y;
+                    const relX = (e.clientX - rect.left - offX) / drawW;
+                    const relY = (e.clientY - rect.top - offY) / drawH;
+                    if (relX >= 0 && relX <= 1 && relY >= 0 && relY <= 1) {
+                        setSeedPoint({ x: relX, y: relY });
+                    }
+                }
+            };
+
+            const handleMouseMove = (e) => {
+                if (!isPanning.current) return;
+                setPan(p => ({
+                    x: p.x + (e.clientX - lastMouse.current.x),
+                    y: p.y + (e.clientY - lastMouse.current.y)
+                }));
+                lastMouse.current = { x: e.clientX, y: e.clientY };
+            };
+
+            return (
+                <div className="flex h-screen w-screen bg-slate-950" onContextMenu={(e) => e.preventDefault()}>
+                    <input type="file" ref={fileInputRef} className="hidden" onChange={(e) => {
+                        const reader = new FileReader();
+                        reader.onload = (ev) => { const img = new Image(); img.onload = () => setImage(img); img.src = ev.target.result; };
+                        reader.readAsDataURL(e.target.files[0]);
+                    }} accept="image/*" />
+                    <div className="w-80 bg-slate-900 border-r border-slate-800 p-6 flex flex-col shadow-2xl z-20">
+                        <h1 className="text-lg font-bold mb-10 italic tracking-tighter uppercase">
+                            <span className="text-sky-500 font-black">Eikonal</span>-Flow
+                        </h1>
+                        <SidebarSection title="Source Artifact">
+                            <button onClick={() => fileInputRef.current.click()} className="w-full bg-slate-800 text-sky-400 py-2.5 rounded-lg text-xs font-bold mb-4 border border-sky-900/30 hover:bg-slate-700 transition-all uppercase tracking-widest">Select Source</button>
+                        </SidebarSection>
+                        <SidebarSection title="Engine Settings">
+                            <Control label="Gamma" value={gamma} min={0.1} max={3} step={0.1} onChange={setGamma} />
+                            <Control label="Contrast" value={contrast} min={0.5} max={4} step={0.1} onChange={setContrast} />
+                            <Control label="Line Count" value={count} min={5} max={150} step={1} onChange={setCount} />
+                        </SidebarSection>
+                        <SidebarSection title="Settings">
+                            <label className="flex items-center gap-3 text-[11px] font-bold text-slate-400 cursor-pointer mb-3 hover:text-sky-400">
+                                <input type="checkbox" checked={showGhost} onChange={() => setShowGhost(!showGhost)} /> GHOST IMAGE
+                            </label>
+                            <label className="flex items-center gap-3 text-[11px] font-bold text-slate-400 cursor-pointer hover:text-sky-400">
+                                <input type="checkbox" checked={showSeed} onChange={() => setShowSeed(!showSeed)} /> WAVE ORIGIN
+                            </label>
+                        </SidebarSection>
+                        <div className="mt-auto pt-4 border-t border-slate-800 text-[10px] uppercase font-mono">
+                             <div className="flex justify-between px-2">
+                                <span className={isProcessing ? "processing-indicator" : "text-slate-600"}>{isProcessing ? ">>> CALC" : "ENGINE READY"}</span>
+                                <span className="text-sky-400">PATHS: {paths.length}</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="flex-1 workspace flex items-center justify-center relative overflow-hidden"
+                         onWheel={(e) => { if(!image) return; setZoom(p => Math.max(0.1, Math.min(10, p * (e.deltaY > 0 ? 0.9 : 1.1)))) }}
+                         onMouseDown={handleMouseDown}
+                         onMouseMove={handleMouseMove}
+                         onMouseUp={() => isPanning.current = false}
+                         onMouseLeave={() => isPanning.current = false}>
+                        
+                        {!image && (
+                            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                                <div className="text-center p-12 border-2 border-slate-800 rounded-2xl bg-slate-900/40 backdrop-blur-sm shadow-2xl">
+                                    <p className="text-[10px] font-bold text-slate-500 uppercase tracking-[0.4em]">Drop Eikonal Artifact Here</p>
+                                    <p className="text-[8px] text-slate-600 mt-2 italic">Ready for Synthesis</p>
+                                </div>
+                            </div>
+                        )}
+                        
+                        <canvas ref={canvasRef} className="max-w-full max-h-full shadow-2xl bg-white/5" />
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
